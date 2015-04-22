@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+ids=($( neutron floatingip-list | grep -Eo "^\| [0-9a-z\-]*" | sed -r 's/\| //g'| sed '1d' ))
+ 
+for id in ${ids[@]}
+do
+ tenant_id=$(neutron floatingip-show ${id} | awk '/tenant_id/{ print $4}')
+ 
+ if [[ "$tenant_id" = "" ]]
+ then
+    echo tenant_id is blank
+ else
+    if keystone tenant-list | grep -q ${tenant_id}
+     then
+        echo found tenant ${tenant_id} for id ${id}
+    else
+        echo did not find tenant ${tenant_id} for id ${id} - deleting...
+        neutron floatingip-delete ${id}
+    fi
+ fi
+done

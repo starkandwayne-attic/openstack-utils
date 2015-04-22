@@ -1,0 +1,70 @@
+#!/bin/bash
+set -e
+
+JQ=$(which jq)
+NEUTRON=$(which neutron)
+
+echo "Determining objects related to external networking"
+for net in $($NEUTRON net-list -f json | $JQ -r '.[].id'); do
+        if [[ $($NEUTRON net-show $net -f json | $JQ -r 'map({key: .Field, value: .Value}) | from_entries | if ."router:external" == true then .id else "" end') != "" ]]; then
+                NET_WHITELIST="${NET_WHITELIST}|$net"
+                for subnet in $($NEUTRON subnet-list -f json | $JQ -r '.[].id'); do
+                        if [[ $($NEUTRON subnet-show $subnet -f json | $JQ -r 'map({key: .Field, value: .Value}) | from_entries | if .network_id == "'$net'" then .id else "" end') != "" ]]; then
+                                SUBNET_WHITELIST="${SUBNET_WHITELIST}|$subnet"
+                                for port in $($NEUTRON port-list -f json | $JQ -r '.[].id'); do
+                                        if [[ $($NEUTRON port-show $port -f json | $JQ -r 'map({key: .Field, value: .Value}) | from_entries | .fixed_ips' | $JQ -r '.subnet_id') == "$subnet" ]]; then
+                                                PORT_WHITELIST="${PORT_WHITELIST}|$port"
+                                        fi
+                                done
+                        fi
+                done
+                for router in $($NEUTRON router-list -f json | $JQ -r '.[].id'); do
+                        if [[ $($NEUTRON router-show $router -f json | $JQ -r 'map({key: .Field, value: .Value}) |from_entries | .external_gateway_info' | $JQ -r '.network_id')  == "$net" ]]; then
+                                ROUTER_WHITELIST="${ROUTER_WHITELIST}|$router"
+                        fi
+                done
+        fi
+done
+NET_WHITELIST=$(echo $NET_WHITELIST |sed 's/^|//')
+SUBNET_WHITELIST=$(echo $SUBNET_WHITELIST |sed 's/^|//')
+ROUTER_WHITELIST=$(echo $ROUTER_WHITELIST |sed 's/^|//')
+PORT_WHITELIST=$(echo $PORT_WHITELIST |sed 's/^|//')
+
+echo Ignoring nets    $NET_WHITELIST
+echo Ignoring subnets $SUBNET_WHITELIST
+echo Ignoring routers $ROUTER_WHITELIST
+echo Ignoring ports   $PORT_WHITELIST
+
+echo "Cleaning up..."
+for router in $($NEUTRON router-list -f json | $JQ -r '.[].id'); do
+        for port in $($NEUTRON router-port-list $router -f json | $JQ -r '.[].id' | egrep -v $PORT_WHITELIST); do
+                echo "Deleting router interface $port"
+                $NEUTRON router-interface-delete $router port=$port
+        done
+done
+
+for floatingip in $($NEUTRON floatingip-list -f json | $JQ -r '.[].id'); do
+        echo "Deleting floatingip $floatingip"
+        $NEUTRON floatingip-delete $floatingip
+done
+
+for router in $($NEUTRON router-list -f json | $JQ -r '.[].id' | egrep -v $ROUTER_WHITELIST); do
+        echo "Deleting router $router"
+        $NEUTRON router-gateway-clear $router
+        $NEUTRON router-delete $router
+done
+
+for port in $($NEUTRON port-list -f json | $JQ -r '.[].id' | egrep -v $PORT_WHITELIST); do
+        echo "Deleting port $port"
+        $NEUTRON port-delete $port
+done
+
+for subnet in $($NEUTRON subnet-list -f json | $JQ -r '.[].id' | egrep -v $SUBNET_WHITELIST); do
+        echo "Deleting subnet $subnet"
+        $NEUTRON subnet-delete $subnet
+done
+
+for net in $($NEUTRON net-list -f json | $JQ -r '.[].id' | egrep -v $NET_WHITELIST); do
+        echo "Deleting net $net"
+        $NEUTRON net-delete $net
+done
